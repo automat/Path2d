@@ -1,0 +1,24 @@
+{
+  "name": "path-2d",
+  "description" : "A renderer-agnostic compact 2d line path representation.",
+  "version": "0.0.1",
+  "private" : true,
+  "main" : "index.js",
+  "repository" : {
+    "type": "git",
+    "url": "https://github.com/automat/path-2d.git"
+  },
+  "keywords":[
+    "path",
+    "geometry"
+  ],
+  "author" : {
+    "name" : "Henryk Wollik",
+    "email" : "hwollik@hotmail.com",
+    "url" : "henrykwollik.com"
+  },
+  "license" : "MIT",
+  "bugs" : {
+    "url": "https://github.com/automat/path-2d/issues"
+  }
+}
