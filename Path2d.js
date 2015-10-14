@@ -17,7 +17,7 @@ var DEFAULT_OPTIONS = {
      * [arcTo]{@link Path2d#arcTo}.
      * @type {Number}
      */
-    numArcPoints : 30,
+    numArcPoints : 30, //30,
     /**
      * Number of points to create path segments for
      * [ellipse]{@link Path2d#ellipse} and
@@ -64,6 +64,22 @@ function createSvgPathCmdLineTo(x,y){
     return 'L ' + x + ' ' + y ;
 }
 
+function createSvgPathCmdLinesTov(points){
+    var cmd = '';
+    for(var i = 0, l = points.length; i < l; i+=2){
+        cmd += 'L ' + points[i] + ' ' + points[i+1] + ' ';
+    }
+    return cmd;
+}
+
+function createSvgPathCmdLinesTo2v(points){
+    var cmd = '';
+    for(var i = 0, l = points.length; i < l; ++i){
+        cmd += 'L ' + points[i][0] + ' ' + points[i][1] + ' ';
+    }
+    return cmd;
+}
+
 function createSvgPathCmdArc(rx,ry,rotation,largeArcFlag,sweepFlag,x,y){
     return 'A ' + rx  + ' ' + ry + ' ' + rotation + ' ' + largeArcFlag + ' ' + sweepFlag + ' ' + x + ' ' + y;
 }
@@ -80,9 +96,10 @@ function createSvgPathCmdClose(){
     return 'Z';
 }
 
-function fmod(a,b){ return Number((a - (Math.floor(a / b) * b)).toPrecision(8)); }
-
-var PI2 = Math.PI * 2;
+var EPSILON  = 1.19209290e-7;
+var PI2      = Math.PI * 2;
+var PI2_NEAR = PI2 * 0.9999;
+var _180_PI  = 180.0 / Math.PI;
 
 /*--------------------------------------------------------------------------------------------------------------------*/
 // SubPath
@@ -726,6 +743,48 @@ Path2d.prototype._getPointOnPath = function(point,out){
 // SubPath modifier
 /*--------------------------------------------------------------------------------------------------------------------*/
 
+/**
+ * Begins a new sub path.
+ */
+Path2d.prototype.beginSubPath = function(){
+    if(!this._recordPoints){
+        return;
+    }
+    this._subPath = new SubPath();
+    this._subPaths.push(this._subPath);
+};
+
+/**
+ * Closes the current sub path.
+ */
+Path2d.prototype.closeSubPath = function(){
+    var subPath = this._subPath =
+        this._subPath === null ?
+            new SubPath() :
+            this._subPath;
+
+    subPath.closed = true;
+
+    if(this._recordPoints){
+        var points       = subPath.points;
+        var pointsLength = points.length;
+
+        if(points[0] == points[pointsLength-2] &&
+            points[1] == points[pointsLength-1]){
+            return;
+        }
+
+        points.push(points[0],points[1]);
+
+        if(this._recordSvgCmd){
+            this._subPath.cmd += createSvgPathCmdClose() + ' ';
+        }
+    } else {
+        this._pathCmd += createSvgPathCmdClose() + ' ';
+    }
+    this._dirty = true;
+};
+
 Path2d.prototype.createSubPathAtIndex = function(index){
     if(index > this._subPaths.length - 1){
         throw new Range('Path2d: Sub-path index out of range');
@@ -766,7 +825,7 @@ Path2d.prototype.moveToSubPathAtIndex = function(subPathIndex){
 };
 
 /*--------------------------------------------------------------------------------------------------------------------*/
-// Path modifier
+// Update
 /*--------------------------------------------------------------------------------------------------------------------*/
 
 /**
@@ -800,11 +859,16 @@ Path2d.prototype.update = function(){
     this._dirty = false;
 };
 
+/*--------------------------------------------------------------------------------------------------------------------*/
+// Path modifier
+/*--------------------------------------------------------------------------------------------------------------------*/
+
 /**
  * Clears all path points.
  */
 Path2d.prototype.clear = function(){
     if(this._recordPoints){
+        this._subPath = null;
         this._subPaths.length = 0;
         this._lengthTotal = 0;
     }
@@ -848,6 +912,10 @@ Path2d.prototype.moveTo = function(x,y){
  */
 Path2d.prototype.lineTo = function(x,y){
     if(this._recordPoints){
+        if(this._subPath.points.length === 0){
+            throw new Error('SubPath line origin missing.');
+        }
+
         this._ensureSubPathType(TYPE_CURVE,TYPE_LINE);
 
         this._subPath.points.push(x,y);
@@ -892,20 +960,10 @@ Path2d.prototype.linesTo = function(points){
                 subPath[offset + j + 1] = point[1];
             }
         }
+    }
 
-        if(this._recordSvgCmd){
-            if(isFlat){
-                for(var i = 0; i < pointsLength; i+=2){
-                    this._subPath.cmd += createSvgPathCmdLineTo(points[i],points[i+1]) + ' ';
-                }
-            } else {
-                for(var i = 0; i < pointsLength; ++i){
-                    this._subPath.cmd += createSvgPathCmdLineTo(points[i][0],points[i][1]) + ' ';
-                }
-            }
-        }
-    } else {
-
+    if(this._recordSvgCmd){
+        this._subPath.cmd += isFlat ? createSvgPathCmdLinesTov(points) : createSvgPathCmdLinesTo2v(points);
     }
 
     this._dirty = subPath._dirty = true;
@@ -1031,6 +1089,132 @@ Path2d.prototype.cubicCurveTo = function(cp1x,cp1y,cp2x,cp2y,x,y,numCurvePoints)
     this._dirty = true;
 };
 
+Path2d.prototype._arc = function(cx,cy,radiusX,radiusY,rotation,sAngle,eAngle,counterclockwise,numArcPoints){
+    var cosrot = Math.cos(rotation);
+    var sinrot = Math.sin(rotation);
+    var srx, sry;
+    var sx, sy;
+    var px, py;
+
+    if(this._recordPoints){
+        if(this._subPath === null || this._subPath.points.length === 0){
+            srx = Math.cos(sAngle) * radiusX;
+            sry = Math.sin(sAngle) * radiusY;
+            sx  = srx * cosrot - sry * sinrot + cx;
+            sy  = srx * sinrot + sry * cosrot + cy;
+            this.moveTo(sx,sy);
+        }
+
+        if(sAngle === eAngle){
+            srx = Math.cos(sAngle) * radiusX;
+            sry = Math.sin(sAngle) * radiusY;
+            sx  = srx * cosrot - sry * sinrot + cx;
+            sy  = srx * sinrot + sry * cosrot + cy;
+            this.lineTo(sx,sy);
+            return;
+        }
+
+        this._ensureSubPathType(TYPE_LINE,TYPE_CURVE);
+
+        var subPath    = this._subPath;
+        var points     = subPath.points;
+        var pointsLen0 = points.length;
+        var pointsLen1 = points.length = pointsLen0 + numArcPoints * 2;
+
+        var sweep = eAngle - sAngle;
+
+        if(counterclockwise){
+            if(sweep <= -PI2){
+                sweep = PI2;
+            } else{
+                while(sweep >= 0){
+                    sweep -= PI2;
+                }
+            }
+        } else {
+            if(sweep >= PI2){
+                sweep = PI2;
+            } else{
+                while(sweep <= 0){
+                    sweep += PI2;
+                }
+            }
+        }
+
+        var numArcPoints_1 = numArcPoints - 1;
+        var angleStep = sweep / numArcPoints_1;
+
+        if(rotation === 0){
+            for(var i = pointsLen0, j = 0, angle; i < pointsLen1; i+=2, j++){
+                angle = sAngle + angleStep * j;
+                points[i  ] = cx + radiusX * Math.cos(angle);
+                points[i+1] = cy + radiusY * Math.sin(angle);
+            }
+
+        } else {
+            for(var i = pointsLen0, j = 0; i < pointsLen1; i+=2, j++){
+                angle = sAngle + angleStep * j;
+
+                px = radiusX * Math.cos(angle);
+                py = radiusY * Math.sin(angle);
+
+                points[i  ] = px * cosrot - py * sinrot + cx;
+                points[i+1] = px * sinrot + py * cosrot + cy;
+            }
+        }
+
+    }
+
+    if(this._recordSvgCmd){
+        var diff = Math.abs(eAngle - sAngle);
+
+        //mimic canvas, sweep larger PI2 get constrained to PI2
+        if((sAngle === eAngle )|| diff <= EPSILON || diff >= PI2){
+            eAngle = sAngle + PI2_NEAR;
+        }
+
+        diff  = eAngle - sAngle;
+        diff += diff < 0 ? PI2 : 0;
+
+        var largeArcFlag = diff > Math.PI;
+            largeArcFlag = counterclockwise ? !largeArcFlag : largeArcFlag;
+
+        var ex, ey;
+
+        if(rotation === 0){
+            sx = cx + radiusX * Math.cos(sAngle);
+            sy = cy + radiusY * Math.sin(sAngle);
+            ex = cx + radiusX * Math.cos(eAngle);
+            ey = cy + radiusY * Math.sin(eAngle);
+
+        } else {
+            var x = radiusX * Math.cos(sAngle);
+            var y = radiusY * Math.sin(sAngle);
+
+            sx  = x * cosrot - y * sinrot + cx;
+            sy  = x * sinrot + y * cosrot + cy;
+
+            x = radiusX * Math.cos(eAngle);
+            y = radiusY * Math.sin(eAngle);
+
+            ex = x * cosrot - y * sinrot + cx;
+            ey = x * sinrot + y * cosrot + cy;
+        }
+
+        this._subPath.cmd += createSvgPathCmdLineTo(
+                sx, sy
+            ) + ' ' +
+            createSvgPathCmdArc(
+                radiusX,radiusY,
+                rotation * _180_PI,
+                +largeArcFlag, +!counterclockwise,
+                ex, ey
+            ) + ' ';
+    }
+
+    this._dirty = true;
+};
+
 /**
  * Adds an arc to the path which is centered at (x, y) position with radius r starting at startAngle and ending at
  * endAngle going in the given direction by anticlockwise (defaulting to clockwise).
@@ -1046,59 +1230,9 @@ Path2d.prototype.cubicCurveTo = function(cp1x,cp1y,cp2x,cp2y,x,y,numCurvePoints)
  * @param {Number} [numArcPoints] - Number of arc points.
  */
 Path2d.prototype.arc = function(cx,cy,r,sAngle,eAngle,counterclockwise,numArcPoints){
-    if(this._recordPoints){
-
-        if(sAngle === eAngle){
-            this.lineTo(cx + Math.cos(sAngle) * r,cy + Math.sin(sAngle) * r);
-            return;
-        }
-
-        numArcPoints     = numArcPoints == undefined ? this._numArcPoints : Math.max(2,numArcPoints);
-        counterclockwise = counterclockwise === undefined ? false : counterclockwise;
-
-        this._ensureSubPathType(TYPE_LINE,TYPE_CURVE);
-
-        var subPath    = this._subPath;
-        var points     = subPath.points;
-        var pointsLen0 = points.length;
-        var pointsLen1 = points.length = pointsLen0 + numArcPoints * 2;
-
-        var numArcPoints_1 = numArcPoints - 1;
-
-        sAngle = fmod(sAngle,PI2);
-        eAngle = fmod(eAngle,PI2);
-
-        if( counterclockwise && sAngle <= eAngle ) {
-            sAngle += PI2;
-        } else if( !counterclockwise && eAngle <= sAngle ) {
-            eAngle += PI2;
-        }
-
-        var sweep     = counterclockwise ? -(sAngle - eAngle) : (eAngle - sAngle);
-        var angleStep = sweep / numArcPoints_1;
-
-        for(var i = pointsLen0, j = 0, angle; i < pointsLen1; i+=2, j++){
-            angle = sAngle + angleStep * j;
-            points[i  ] = cx + r * Math.cos(angle);
-            points[i+1] = cy + r * Math.sin(angle);
-        }
-
-        if(this._recordSvgCmd){
-            this._subPath.cmd += createSvgPathCmdLineTo(
-                            points[pointsLen0],points[pointsLen0+1]
-                         ) + ' ' +
-                         createSvgPathCmdArc(
-                            r,r,
-                            0,
-                            0,0,
-                            points[pointsLen1-2],points[pointsLen1-1]
-                         ) + ' ';
-        }
-    } else {
-
-    }
-
-    this._dirty = true;
+    counterclockwise = counterclockwise || false;
+    numArcPoints     = numArcPoints === undefined ? this._numArcPoints : numArcPoints;
+    this._arc(cx,cy,r,r,0,sAngle,eAngle,counterclockwise,numArcPoints);
 };
 
 /**
@@ -1111,7 +1245,7 @@ Path2d.prototype.arc = function(cx,cy,r,sAngle,eAngle,counterclockwise,numArcPoi
  * @param {Number} [numArcPoints] - Number of arc points.
  */
 //http://d.hatena.ne.jp/mindcat/20100131/1264958828
-Path2d.prototype.arcTo = function(x1,y1,x2,y2,rad,numArcPoints){
+Path2d.prototype.arcTo = function(x1,y1,x2,y2,radius,numArcPoints){
     if(this._recordPoints){
         numArcPoints = numArcPoints === undefined ? this._numArcPoints : Math.max(2,numArcPoints);
 
@@ -1123,34 +1257,29 @@ Path2d.prototype.arcTo = function(x1,y1,x2,y2,rad,numArcPoints){
         var b2 = x2 - x1;
         var mm = Math.abs(a1*b2 - b1*a2);
 
-        if (mm === 0 || rad === 0) {
+        if (mm === 0 || radius === 0) {
             this.lineTo(x1, y1)
-        } else {
-            var dd = a1 * a1 + b1 * b1;
-            var cc = a2 * a2 + b2 * b2;
-            var tt = a1 * a2 + b1 * b2;
-            var k1 = rad * Math.sqrt(dd) / mm;
-            var k2 = rad * Math.sqrt(cc) / mm;
-            var j1 = k1 * tt / dd;
-            var j2 = k2 * tt / cc;
-            var cx = k1 * b2 + k2 * b1;
-            var cy = k1 * a2 + k2 * a1;
-            var px = b1 * (k2 + j1);
-            var py = a1 * (k2 + j1);
-            var qx = b2 * (k1 + j2);
-            var qy = a2 * (k1 + j2);
-            var ang1 = Math.atan2(py - cy, px - cx);
-            var ang2 = Math.atan2(qy - cy, qx - cx);
-
-            var ang3 = Math.abs(ang2-ang1);
-
-
-            this.arc(300,300,rad,ang1,ang1 + Math.PI,false);
-            //this.lineTo(px + x1, py + y1);
-            //this.arc(cx + x1, cy + y1, rad, ang1, ang2, b1 * a2 > b2 * a1, numArcPoints);
-            //this.arc(cx + x1, cy + y1, rad, ang2, ang2 + ang3, b1 * a2 > b2 * a1, numArcPoints);
+            return;
         }
 
+        var dd = a1 * a1 + b1 * b1;
+        var cc = a2 * a2 + b2 * b2;
+        var tt = a1 * a2 + b1 * b2;
+        var k1 = radius * Math.sqrt(dd) / mm;
+        var k2 = radius * Math.sqrt(cc) / mm;
+        var j1 = k1 * tt / dd;
+        var j2 = k2 * tt / cc;
+        var cx = k1 * b2 + k2 * b1;
+        var cy = k1 * a2 + k2 * a1;
+        var px = b1 * (k2 + j1);
+        var py = a1 * (k2 + j1);
+        var qx = b2 * (k1 + j2);
+        var qy = a2 * (k1 + j2);
+        var ang1 = Math.atan2(py - cy, px - cx);
+        var ang2 = Math.atan2(qy - cy, qx - cx);
+
+        this.lineTo(px + x1, py + y1);
+        this.arc(cx + x1, cy + y1, radius, ang1, ang2, b1 * a2 > b2 * a1,numArcPoints);
 
         if(this._recordSvgCmd){
 
@@ -1178,169 +1307,12 @@ Path2d.prototype.arcTo = function(x1,y1,x2,y2,rad,numArcPoints){
  * @param [numEllipsePoints] - Number of ellipse points.
  */
 Path2d.prototype.ellipse = function(x,y,radiusX,radiusY,rotation,sAngle,eAngle,counterclockwise,numEllipsePoints){
-
-
-    counterclockwise = counterclockwise === undefined ? false : counterclockwise;
-
-    var cosrot = Math.cos(rotation);
-    var sinrot = Math.sin(rotation);
-
-    var direction = counterclockwise ? -1 : 1;
-    var angle;
-
-    var sx, sy;
-    var px, py;
-    var exr, eyr;
-    var ex, ey;
-
-    if(this._recordPoints){
-        numEllipsePoints = numEllipsePoints == undefined ? this._numEllipsePoints : Math.max(2,numEllipsePoints);
-
-        var subPathInitial = false;
-        if(this._subPath === null){
-            var srx = Math.cos(sAngle) * radiusX * direction;
-            var sry = Math.sin(sAngle) * radiusY * direction;
-            sx = srx * cosrot - sry * sinrot + x;
-            sy = srx * sinrot + sry * cosrot + y;
-
-            this.moveTo(sx,sy);
-            this._subPath.type = TYPE_CURVE;
-            subPathInitial = true;
-        }
-
-
-        this._ensureSubPathType(TYPE_LINE,TYPE_CURVE);
-
-        var subPath    = this._subPath;
-        var points     = subPath.points;
-        var pointsLen0 = points.length;
-        var pointsLen1 = points.length = pointsLen0 + numEllipsePoints * 2;
-
-        var numEllipsePoints_1 = numEllipsePoints - 1;
-
-        //eAngle == 0
-        if(counterclockwise && (sAngle <= eAngle)){
-            sAngle += PI2;
-        } else if(!counterclockwise && eAngle <= sAngle){
-            eAngle += PI2;
-        }
-
-        var sweep     = counterclockwise ? -(sAngle - eAngle) : (eAngle - sAngle);
-        var angleStep = sweep / numEllipsePoints_1;
-
-        for(var i = pointsLen0, j = 0; i < pointsLen1; i+=2, j++){
-            angle = sAngle + angleStep * j;
-
-            px = radiusX * Math.cos(angle);
-            py = radiusY * Math.sin(angle);
-
-            points[i  ] = px * cosrot - py * sinrot + x;
-            points[i+1] = px * sinrot + py * cosrot + y;
-        }
-
-        if(this._recordSvgCmd){
-            //mimics canvas
-            rotation = rotation * 180 / Math.PI;
-            angle    = eAngle - sAngle;
-
-            if(Math.abs(angle) == PI2){
-                if(!subPathInitial) {
-                    sx = points[pointsLen0  ];
-                    sy = points[pointsLen0+1];
-                }
-
-                exr = radiusX * Math.cos(Math.PI);
-                eyr = radiusY * Math.sin(Math.PI);
-                ex  = exr * cosrot - eyr * sinrot + x;
-                ey  = exr * sinrot + eyr * cosrot + y;
-
-                this._subPath.cmd += createSvgPathCmdLineTo(
-                                sx,sy
-                             ) + ' ' +
-                             createSvgPathCmdArc(
-                                 radiusX,radiusY,
-                                 rotation,
-                                 0,1,
-                                 ex,ey
-                             ) + ' ' +
-                             createSvgPathCmdLineTo(
-                                ex,ey
-                             ) + ' ' +
-                             createSvgPathCmdArc(
-                                 radiusX,radiusY,
-                                 rotation,0,1,
-                                 radiusX * cosrot + x,radiusX * sinrot + y
-                             ) + ' ';
-
-            } else {
-                this._subPath.cmd += createSvgPathCmdLineTo(
-                                 points[pointsLen0],points[pointsLen0+1]
-                             ) + ' ' +
-                             createSvgPathCmdArc(
-                                 radiusX,radiusY,
-                                 rotation,
-                                 1,1,
-                                 points[pointsLen1-2],points[pointsLen1-1]
-                             ) + ' ';
-
-            }
-        }
-    } else {
-        //mimics canvas
-        rotation = rotation * 180 / Math.PI;
-        angle    = eAngle - sAngle;
-
-        if(Math.abs(angle) == PI2){
-            sx = radiusX;
-            sy = 0;
-            exr = radiusX * Math.cos(Math.PI);
-            eyr = radiusY * Math.sin(Math.PI);
-            ex  = exr * cosrot - eyr * sinrot + x;
-            ey  = exr * sinrot + eyr * cosrot + y;
-
-            this._pathCmd += createSvgPathCmdLineTo(
-                            sx,sy
-                         ) + ' ' +
-                         createSvgPathCmdArc(
-                             radiusX,radiusY,
-                             rotation,
-                             0,1,
-                             ex,ey
-                         ) + ' ';
-
-            this._pathCmd += createSvgPathCmdLineTo(
-                            ex,ey
-                         ) + ' ' +
-                         createSvgPathCmdArc(
-                             radiusX,radiusY,
-                             rotation,
-                             0,1,
-                             radiusX * cosrot + x,radiusX * sinrot + y
-                         ) + ' ';
-
-        } else {
-
-            px = radiusX * Math.cos(sAngle) * direction;
-            py = radiusY * Math.sin(sAngle) * direction;
-
-            this._pathCmd += createSvgPathCmdLineTo(
-                px * cosrot - py * sinrot + x,px * sinrot + py * cosrot + y
-            ) + ' ';
-
-            px = radiusX * Math.cos(eAngle) * direction;
-            py = radiusY * Math.sin(eAngle) * direction;
-
-            this._pathCmd += createSvgPathCmdArc(
-                radiusX,radiusY,
-                rotation,
-                1,1,
-                px * cosrot - py * sinrot + x,px * sinrot + py * cosrot + y
-            ) + ' ';
-        }
-    }
-
-    this._dirty = true;
+    counterclockwise = counterclockwise || false;
+    numEllipsePoints = numEllipsePoints === undefined ? this._numEllipsePoints : numEllipsePoints;
+    this._arc(x,y,radiusX,radiusY,rotation,sAngle,eAngle,counterclockwise,numEllipsePoints);
 };
+
+Path2d.prototype.ellipseCentered = function(){};
 
 /**
  * Creates a new sub path ellipse which is centered at (x, y) position with the radii radiusX and radiusY starting at
@@ -1369,6 +1341,8 @@ Path2d.prototype.ellipseAt = function(x,y,radiusX,radiusY,rotation,startAngle,en
     );
 };
 
+Path2d.prototype.ellipseCenteredAt = function(){};
+
 /**
  * Creates a path for a rectangle at position (x, y) with a size that is determined by width and height. Those four
  * points are connected by straight lines and the sub-path is marked as closed.
@@ -1396,33 +1370,6 @@ Path2d.prototype.rect = function(x,y,width,height){
                          createSvgPathCmdLineTo(xw,yh) + ' ' +
                          createSvgPathCmdLineTo(x,yh) + ' ' +
                          createSvgPathCmdClose() + ' ';
-    }
-
-    this._dirty = true;
-};
-
-/**
- * Closes the current sub path.
- */
-Path2d.prototype.close = function(){
-    var subPath = this._subPath;
-    subPath.closed = true;
-    if(this._recordPoints){
-        var points       = subPath.points;
-        var pointsLength = points.length;
-
-        if(points[0] == points[pointsLength-2] &&
-           points[1] == points[pointsLength-1]){
-            return;
-        }
-
-        points.push(points[0],points[1]);
-
-        if(this._recordSvgCmd){
-            this._subPath.cmd += createSvgPathCmdClose() + ' ';
-        }
-    } else {
-        this._pathCmd += createSvgPathCmdClose() + ' ';
     }
 
     this._dirty = true;
@@ -1490,7 +1437,7 @@ Path2d.prototype.getPointAtLength = function(length,out){
  * @returns {Number[]}
  */
 Path2d.prototype.getTangentAtLength = function(length,out){
-    if(!this._calcTangentsAndNormals){
+    if(!this._calcTangentsAndNormals || this._subPaths.length === 0){
         return [-1,-1];
     }
 
@@ -1525,7 +1472,7 @@ Path2d.prototype.getTangentAtLength = function(length,out){
  * @returns {Number[]}
  */
 Path2d.prototype.getNormalAtLength = function(length,out){
-    if(!this._calcTangentsAndNormals){
+    if(!this._calcTangentsAndNormals || this._subPaths.length === 0){
         return [-1,-1];
     }
 
@@ -1560,7 +1507,7 @@ Path2d.prototype.getNormalAtLength = function(length,out){
  * @returns {Number[]}
  */
 Path2d.prototype.getPointAndTangentAndNormalAtLength = function(length,out){
-    if(!this._calcTangentsAndNormals){
+    if(!this._calcTangentsAndNormals || this._subPaths.length === 0){
         return [-1,-1,-1,-1,-1,-1];
     }
 
@@ -1606,7 +1553,7 @@ Path2d.prototype.getPointAndTangentAndNormalAtLength = function(length,out){
  * @returns {Number[]}
  */
 Path2d.prototype.getTangentAndNormalAtLength = function(length,out){
-    if(!this._calcTangentsAndNormals){
+    if(!this._calcTangentsAndNormals || this._subPaths.length === 0){
         return [-1,-1,-1,-1];
     }
 
@@ -1645,7 +1592,7 @@ Path2d.prototype.getTangentAndNormalAtLength = function(length,out){
  * @returns {Number[]}
  */
 Path2d.prototype.getPointOnSegment = function(point,subPathIndex,segIndex,out){
-    if(!this._recordPoints){
+    if(!this._recordPoints || this._subPaths.length === 0){
         return [-1,-1,-1];
     }
     out = out || [0,0];
@@ -1667,7 +1614,7 @@ Path2d.prototype.getPointOnSegment = function(point,subPathIndex,segIndex,out){
  * @returns {Number[]}
  */
 Path2d.prototype.getPointOnSubPath = function(point,subPathIndex,out){
-    if(!this._recordPoints){
+    if(!this._recordPoints || this._subPaths.length === 0){
         return [-1,-1];
     }
     out = out || [0,0];
@@ -1687,7 +1634,7 @@ Path2d.prototype.getPointOnSubPath = function(point,subPathIndex,out){
  * @returns {Number[]}
  */
 Path2d.prototype.getPointOnPath = function(point,out){
-    if(!this._recordPoints){
+    if(!this._recordPoints || this._subPaths.length === 0){
         return [-1,-1];
     }
     out = out ||  [0,0];
@@ -1707,7 +1654,7 @@ Path2d.prototype.getPointOnPath = function(point,out){
  * @returns {Number[]}
  */
 Path2d.prototype.getSegmentIndexNearestToPoint = function(point,out){
-    if(!this._recordPoints){
+    if(!this._recordPoints || this._subPaths.length === 0){
         return [-1,-1]
     }
     out = out || [0,0];
@@ -1726,7 +1673,7 @@ Path2d.prototype.getSegmentIndexNearestToPoint = function(point,out){
  * @returns {Number}
  */
 Path2d.prototype.getSubPathIndexNearestToPoint = function(point){
-    if(!this._recordPoints){
+    if(!this._recordPoints || this._subPaths.length === 0){
         return -1;
     }
     this.update();
@@ -1740,7 +1687,7 @@ Path2d.prototype.getSubPathIndexNearestToPoint = function(point){
  * @returns {Number[]}
  */
 Path2d.prototype.getSegmentCopyNearestToPoint = function(point,out){
-    if(!this._recordPoints){
+    if(!this._recordPoints || this._subPaths.length === 0){
         return [-1,-1,-1,-1];
     }
 
@@ -1766,7 +1713,7 @@ Path2d.prototype.getSegmentCopyNearestToPoint = function(point,out){
  * @returns {SubPath}
  */
 Path2d.prototype.getSubPathNearestToPoint = function(point){
-    if(!this._recordPoints){
+    if(!this._recordPoints || this._subPaths.length === 0){
         return null;
     }
 
@@ -1781,7 +1728,7 @@ Path2d.prototype.getSubPathNearestToPoint = function(point){
  * @returns {Number}
  */
 Path2d.prototype.getDistanceToSegment = function(point,subPathIndex,segIndex){
-    if(!this._recordPoints){
+    if(!this._recordPoints || this._subPaths.length === 0){
         return -1;
     }
 
@@ -1797,7 +1744,7 @@ Path2d.prototype.getDistanceToSegment = function(point,subPathIndex,segIndex){
  * @returns {Number}
  */
 Path2d.prototype.getDistanceToSubPath = function(point,subPathIndex){
-    if(!this._recordPoints){
+    if(!this._recordPoints || this._subPaths.length === 0){
         return -1;
     }
 
@@ -1812,7 +1759,7 @@ Path2d.prototype.getDistanceToSubPath = function(point,subPathIndex){
  * @returns {Number}
  */
 Path2d.prototype.getDistanceToPath = function(point){
-    if(!this._recordPoints){
+    if(!this._recordPoints || this._subPaths.length === 0){
         return -1;
     }
 
@@ -1848,7 +1795,7 @@ Path2d.prototype.getLengthOnSubPath = function(point,subPathIndex){
  * @returns {Number}
  */
 Path2d.prototype.getLengthOnPath = function(point){
-    if(!this._recordPoints){
+    if(!this._recordPoints || this._subPaths.length === 0){
         return -1;
     }
     this.update();
@@ -1861,7 +1808,7 @@ Path2d.prototype.getLengthOnPath = function(point){
  * @returns {Number}
  */
 Path2d.prototype.getSubPathIndexAtLength = function(length){
-    if(!this._recordPoints){
+    if(!this._recordPoints || this._subPaths.length === 0){
         return -1;
     }
     var indices;
@@ -1885,7 +1832,7 @@ Path2d.prototype.getSubPathIndexAtLength = function(length){
  * @returns {Number[]}
  */
 Path2d.prototype.getPathSegIndexAtLength = function(length,out){
-    if(!this._recordPoints){
+    if(!this._recordPoints || this._subPaths.length === 0){
         return [-1,-1];
     }
     var indices;
@@ -1910,7 +1857,7 @@ Path2d.prototype.getPathSegIndexAtLength = function(length,out){
  * @returns {SubPath||null}
  */
 Path2d.prototype.getSubPathAtLength = function(length){
-    if(!this._recordPoints){
+    if(!this._recordPoints || this._subPaths.length === 0){
         return null;
     }
     return this._subPaths[this.getSubPathIndexAtLength(length)];
@@ -1924,7 +1871,7 @@ Path2d.prototype.getSubPathAtLength = function(length){
  * @returns {*}
  */
 Path2d.prototype.getSegmentCopyAtLength = function(length,out){
-    if(!this._recordPoints){
+    if(!this._recordPoints || this._subPaths.length === 0){
         return [-1,-1,-1,-1];
     }
     out = out || [0,0,0,0];
@@ -1997,10 +1944,6 @@ Path2d.prototype.copy = function(){
 /*--------------------------------------------------------------------------------------------------------------------*/
 // Svg path cmd
 /*--------------------------------------------------------------------------------------------------------------------*/
-
-//function parseSvgCmd(cmd){
-//    var partials = cmd.split();
-//}
 
 //TODO: Add non Path2d generated svg cmds
 /**
@@ -2138,6 +2081,7 @@ Path2d.prototype.setRecordSvgCmd = function(enable){
 Path2d.prototype.isRecordSvgCmdEnabled = function(){
     return this._recordSvgCmd;
 };
+
 
 /*--------------------------------------------------------------------------------------------------------------------*/
 // Factory
